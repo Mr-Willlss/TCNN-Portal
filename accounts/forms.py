@@ -1,5 +1,6 @@
 from django import forms
 from django.contrib.auth import get_user_model, password_validation
+from django.contrib.auth.forms import PasswordChangeForm
 from django.core.exceptions import ValidationError
 
 
@@ -49,3 +50,12 @@ class InitialICTSetupForm(forms.Form):
                 self.add_error('password1', error)
 
         return cleaned_data
+
+
+class RequiredPasswordChangeForm(PasswordChangeForm):
+    def save(self, commit=True):
+        user = super().save(commit=False)
+        user.must_change_password = False
+        if commit:
+            user.save()
+        return user

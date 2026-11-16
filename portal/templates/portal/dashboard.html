@@ -5,4 +5,19 @@
 {% block content %}
     <h1>{{ heading }}</h1>
     <p>{% firstof request.user.get_full_name request.user.username %}</p>
+    {% if heading == 'ICT' %}
+        <dl>
+            <dt>Active students</dt>
+            <dd>{{ active_students }}</dd>
+            <dt>Active staff</dt>
+            <dd>{{ active_staff }}</dd>
+            <dt>Programs</dt>
+            <dd>{{ program_count }}</dd>
+        </dl>
+        <h2>Administration</h2>
+        <ul>
+            <li><a href="{% url 'ict_programs' %}">Programs</a></li>
+            <li><a href="{% url 'ict_staff' %}">Staff accounts</a></li>
+        </ul>
+    {% endif %}
 {% endblock %}

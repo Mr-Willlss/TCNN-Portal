@@ -12,3 +12,4 @@ class User(AbstractUser):
         STUDENT = 'STUDENT', 'Student'
 
     role = models.CharField(max_length=10, choices=Role.choices, default=Role.STUDENT)
+    must_change_password = models.BooleanField(default=False)

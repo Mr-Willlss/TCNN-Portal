@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+
+{% block title %}Staff | ICT | TCNN Portal{% endblock %}
+
+{% block content %}
+    <h1>Staff accounts</h1>
+    <p><a href="{% url 'ict_home' %}">ICT dashboard</a></p>
+    <p><a href="{% url 'ict_staff_add' %}">Add staff account</a></p>
+    <form method="get">
+        {% csrf_token %}
+        <label for="q">Search by name or username</label>
+        <input id="q" name="q" type="search" value="{{ query }}">
+        <button type="submit">Search</button>
+    </form>
+    {% if staff %}
+        <table>
+            <thead>
+                <tr><th>Name</th><th>Username</th><th>Role</th><th>Status</th><th>Actions</th></tr>
+            </thead>
+            <tbody>
+                {% for staff_user in staff %}
+                    <tr>
+                        <td>{% firstof staff_user.get_full_name staff_user.username %}</td>
+                        <td>{{ staff_user.username }}</td>
+                        <td>{{ staff_user.get_role_display }}</td>
+                        <td>{% if staff_user.is_active %}Active{% else %}Inactive{% endif %}</td>
+                        <td>
+                            <a href="{% url 'ict_staff_edit' staff_user.pk %}">Edit</a>
+                            <a href="{% url 'ict_staff_reset_password' staff_user.pk %}">Reset password</a>
+                            {% if staff_user.is_active %}
+                                <form method="post" action="{% url 'ict_staff_deactivate' staff_user.pk %}">
+                                    {% csrf_token %}
+                                    <button type="submit">Deactivate</button>
+                                </form>
+                            {% else %}
+                                <form method="post" action="{% url 'ict_staff_reactivate' staff_user.pk %}">
+                                    {% csrf_token %}
+                                    <button type="submit">Reactivate</button>
+                                </form>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    {% else %}
+        <p>No staff accounts match this search.</p>
+    {% endif %}
+{% endblock %}

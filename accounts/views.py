@@ -1,15 +1,15 @@
 from django.contrib.auth import get_user_model
 from django.contrib.auth.decorators import login_required
-from django.contrib.auth.views import LoginView
+from django.contrib.auth.views import LoginView, PasswordChangeView
 from django.db import transaction
 from django.http import Http404
 from django.shortcuts import redirect, render
-from django.urls import reverse
+from django.urls import reverse, reverse_lazy
 from django.views.decorators.http import require_http_methods
 
 from portal.models import AuditLog
 
-from .forms import InitialICTSetupForm
+from .forms import InitialICTSetupForm, RequiredPasswordChangeForm
 
 
 class RoleLoginView(LoginView):
@@ -22,6 +22,19 @@ class RoleLoginView(LoginView):
             get_user_model().Role.LIBRARY: 'library_home',
         }
         return reverse(role_urls.get(self.request.user.role, 'no_screen'))
+
+
+class RequiredPasswordChangeView(PasswordChangeView):
+    form_class = RequiredPasswordChangeForm
+    template_name = 'accounts/password_change.html'
+
+    def get_success_url(self):
+        role_urls = {
+            self.request.user.Role.ICT: 'ict_home',
+            self.request.user.Role.STUDENT: 'student_home',
+            self.request.user.Role.LIBRARY: 'library_home',
+        }
+        return reverse_lazy(role_urls.get(self.request.user.role, 'no_screen'))
 
 
 @require_http_methods(['GET', 'POST'])

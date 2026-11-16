@@ -163,3 +163,35 @@ class RoleAccessTests(TestCase):
         self.assertEqual(self.client.get('/accounts/logout/').status_code, 405)
         response = self.client.post('/accounts/logout/')
         self.assertRedirects(response, reverse('login'))
+
+
+class RequiredPasswordChangeTests(TestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username='temporary_user',
+            password='Temporary-Password-2026!',
+            role=get_user_model().Role.ICT,
+            must_change_password=True,
+        )
+        self.client.force_login(self.user)
+
+    def test_flagged_user_is_redirected_until_password_is_changed(self):
+        response = self.client.get(reverse('ict_home'))
+        self.assertRedirects(response, reverse('password_change'))
+        self.assertEqual(self.client.get(reverse('password_change')).status_code, 200)
+
+        response = self.client.post(reverse('password_change'), {
+            'old_password': 'Temporary-Password-2026!',
+            'new_password1': 'New-Strong-Password-2026!',
+            'new_password2': 'New-Strong-Password-2026!',
+        })
+        self.assertRedirects(response, reverse('ict_home'))
+        self.user.refresh_from_db()
+        self.assertFalse(self.user.must_change_password)
+        self.assertTrue(self.user.check_password('New-Strong-Password-2026!'))
+        self.assertEqual(self.client.get(reverse('ict_home')).status_code, 200)
+
+    def test_logout_and_static_media_are_exempt_from_password_redirect(self):
+        self.assertEqual(self.client.get(reverse('logout')).status_code, 405)
+        self.assertEqual(self.client.get('/static/site.css').status_code, 404)
+        self.assertEqual(self.client.get('/media/photo.jpg').status_code, 404)
