@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+
+{% block title %}Students | ICT | TCNN Portal{% endblock %}
+
+{% block content %}
+    <h1>Students</h1>
+    <p><a href="{% url 'ict_home' %}">ICT dashboard</a></p>
+    <p><a href="{% url 'ict_student_add' %}">Add student</a></p>
+    <form method="get">
+        {% csrf_token %}
+        <label for="q">Search by name or matric number</label>
+        <input id="q" name="q" type="search" value="{{ query }}">
+        <label for="program">Program</label>
+        <select id="program" name="program">
+            <option value="">All programs</option>
+            {% for program in programs %}
+                <option value="{{ program.pk }}"{% if program_filter == program.pk|stringformat:"s" %} selected{% endif %}>
+                    {{ program.name }} ({{ program.code }})
+                </option>
+            {% endfor %}
+        </select>
+        <label for="status">Status</label>
+        <select id="status" name="status">
+            <option value="">All statuses</option>
+            {% for value, label in status_choices %}
+                <option value="{{ value }}"{% if status_filter == value %} selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+        </select>
+        <button type="submit">Filter students</button>
+    </form>
+
+    {% if students %}
+        <table>
+            <thead>
+                <tr>
+                    <th>Matric number</th>
+                    <th>Name</th>
+                    <th>Class</th>
+                    <th>Status</th>
+                    <th>Clinic clearance</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for student in students %}
+                    <tr>
+                        <td>{{ student.matric_number }}</td>
+                        <td>{% firstof student.user.get_full_name student.user.username %}</td>
+                        <td>{{ student.class_label }}</td>
+                        <td>{{ student.get_status_display }}</td>
+                        <td>{{ student.get_clinic_clearance_display }}</td>
+                        <td>
+                            <a href="{% url 'ict_student_edit' student.pk %}">Edit</a>
+                            {% if student.status == 'DEACTIVATED' %}
+                                <form method="post" action="{% url 'ict_student_reactivate' student.pk %}">
+                                    {% csrf_token %}
+                                    <button type="submit">Reactivate</button>
+                                </form>
+                            {% else %}
+                                <form method="post" action="{% url 'ict_student_deactivate' student.pk %}">
+                                    {% csrf_token %}
+                                    <button type="submit">Deactivate</button>
+                                </form>
+                            {% endif %}
+                            <details>
+                                <summary>Reset password</summary>
+                                <form method="post" action="{% url 'ict_student_reset_password' student.pk %}">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="q" value="{{ query }}">
+                                    <input type="hidden" name="program" value="{{ program_filter }}">
+                                    <input type="hidden" name="status" value="{{ status_filter }}">
+                                    <input type="hidden" name="page" value="{{ page_obj.number }}">
+                                    {% if reset_form and reset_profile_id == student.pk %}
+                                        {{ reset_form.as_p }}
+                                    {% else %}
+                                        <p>
+                                            <label for="password1-{{ student.pk }}">Temporary password</label>
+                                            <input id="password1-{{ student.pk }}" name="password1" type="password" required>
+                                        </p>
+                                        <p>
+                                            <label for="password2-{{ student.pk }}">Confirm temporary password</label>
+                                            <input id="password2-{{ student.pk }}" name="password2" type="password" required>
+                                        </p>
+                                    {% endif %}
+                                    <button type="submit">Set temporary password</button>
+                                </form>
+                            </details>
+                        </td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        <nav aria-label="Student list pages">
+            {% if page_obj.has_previous %}
+                <a href="?q={{ query|urlencode }}&amp;program={{ program_filter|urlencode }}&amp;status={{ status_filter|urlencode }}&amp;page={{ page_obj.previous_page_number }}">Previous</a>
+            {% endif %}
+            <span>Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}</span>
+            {% if page_obj.has_next %}
+                <a href="?q={{ query|urlencode }}&amp;program={{ program_filter|urlencode }}&amp;status={{ status_filter|urlencode }}&amp;page={{ page_obj.next_page_number }}">Next</a>
+            {% endif %}
+        </nav>
+    {% else %}
+        <p>No students match these filters.</p>
+    {% endif %}
+{% endblock %}

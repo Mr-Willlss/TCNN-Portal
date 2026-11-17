@@ -5,6 +5,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from django.core.exceptions import ValidationError
 from django.core.files.base import ContentFile
 from django.db import models
+from django.db.models.functions import Lower
 from django.conf import settings
 
 
@@ -62,16 +63,24 @@ class StudentProfile(models.Model):
         on_delete=models.CASCADE,
         related_name='student_profile',
     )
-    matric_number = models.CharField(max_length=50, unique=True)
+    matric_number = models.CharField(max_length=50)
     program = models.ForeignKey(Program, on_delete=models.PROTECT, related_name='students')
     year_of_study = models.PositiveIntegerField()
-    passport_photo = models.ImageField(upload_to='passports/')
+    passport_photo = models.ImageField(upload_to='passports/', blank=True)
     status = models.CharField(max_length=12, choices=Status.choices, default=Status.ACTIVE)
     clinic_clearance = models.CharField(
         max_length=12,
         choices=ClinicClearance.choices,
         default=ClinicClearance.NOT_CLEARED,
     )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                Lower('matric_number'),
+                name='unique_student_matric_number_ci',
+            ),
+        ]
 
     @property
     def class_label(self):
@@ -81,6 +90,7 @@ class StudentProfile(models.Model):
         return self.matric_number
 
     def save(self, *args, **kwargs):
+        self.matric_number = self.matric_number.strip().upper()
         if self.passport_photo and not self.passport_photo._committed:
             upload = self.passport_photo
             processed_photo = _process_passport_photo(upload)

@@ -1,5 +1,6 @@
 from django.contrib import messages
 from django.contrib.auth import get_user_model
+from django.core.paginator import Paginator
 from django.db import transaction
 from django.db.models import Q
 from django.http import HttpResponseForbidden
@@ -8,12 +9,22 @@ from django.views.decorators.http import require_http_methods, require_POST
 
 from accounts.decorators import role_required
 
-from .forms import ProgramForm, StaffCreateForm, StaffEditForm, TemporaryPasswordForm
-from .models import AuditLog, Program
+from .forms import (
+    ProgramForm,
+    StaffCreateForm,
+    StaffEditForm,
+    StudentCreateForm,
+    StudentEditForm,
+    StudentPasswordResetForm,
+    TemporaryPasswordForm,
+)
+from .models import AuditLog, Program, StudentProfile
+
+
+User = get_user_model()
 
 
 def _staff_queryset():
-    User = get_user_model()
     staff_roles = [role for role, _label in User.Role.choices if role != User.Role.STUDENT]
     return User.objects.filter(role__in=staff_roles)
 
@@ -41,6 +52,246 @@ def _program_values(program):
     return (
         f'name={program.name}; code={program.code}; '
         f'duration_years={program.duration_years}'
+    )
+
+
+def _student_values(profile):
+    photo = profile.passport_photo.name if profile.passport_photo else ''
+    return (
+        f'username={profile.user.username}; first_name={profile.user.first_name}; '
+        f'last_name={profile.user.last_name}; matric_number={profile.matric_number}; '
+        f'program={profile.program.code}; year_of_study={profile.year_of_study}; '
+        f'status={profile.status}; clinic_clearance={profile.clinic_clearance}; '
+        f'is_active={profile.user.is_active}; passport_photo={photo}'
+    )
+
+
+def _student_list_context(request, reset_form=None, reset_profile_id=None):
+    query = request.GET.get('q', request.POST.get('q', '')).strip()
+    program_filter = request.GET.get('program', request.POST.get('program', ''))
+    status_filter = request.GET.get('status', request.POST.get('status', ''))
+    students = StudentProfile.objects.select_related('user', 'program').all()
+    if query:
+        terms = query.split()
+        search = (
+            Q(matric_number__icontains=query)
+            | Q(user__first_name__icontains=query)
+            | Q(user__last_name__icontains=query)
+        )
+        if len(terms) > 1:
+            search |= (
+                Q(user__first_name__icontains=terms[0])
+                & Q(user__last_name__icontains=' '.join(terms[1:]))
+            ) | (
+                Q(user__last_name__icontains=terms[0])
+                & Q(user__first_name__icontains=' '.join(terms[1:]))
+            )
+        students = students.filter(search)
+    if program_filter.isdigit():
+        students = students.filter(program_id=program_filter)
+    status_choices = dict(StudentProfile.Status.choices)
+    if status_filter in status_choices:
+        students = students.filter(status=status_filter)
+
+    page_obj = Paginator(
+        students.order_by('matric_number', 'pk'),
+        25,
+    ).get_page(request.GET.get('page', request.POST.get('page')))
+    return {
+        'page_obj': page_obj,
+        'students': page_obj.object_list,
+        'programs': Program.objects.order_by('name', 'code'),
+        'query': query,
+        'program_filter': program_filter,
+        'status_filter': status_filter,
+        'status_choices': StudentProfile.Status.choices,
+        'reset_form': reset_form,
+        'reset_profile_id': reset_profile_id,
+    }
+
+
+@role_required(User.Role.ICT)
+def ict_students(request):
+    return render(
+        request,
+        'portal/ict/student_list.html',
+        _student_list_context(request),
+    )
+
+
+@role_required(User.Role.ICT)
+@require_http_methods(['GET', 'POST'])
+def ict_student_add(request):
+    form = StudentCreateForm(
+        request.POST or None,
+        request.FILES or None,
+    )
+    if request.method == 'POST' and form.is_valid():
+        with transaction.atomic():
+            user = User.objects.create_user(
+                username=form.cleaned_data['matric_number'],
+                first_name=form.cleaned_data['first_name'],
+                last_name=form.cleaned_data['last_name'],
+                role=User.Role.STUDENT,
+                password=form.cleaned_data['temporary_password'],
+                must_change_password=True,
+            )
+            profile = StudentProfile(
+                user=user,
+                matric_number=form.cleaned_data['matric_number'],
+                program=form.cleaned_data['program'],
+                year_of_study=form.cleaned_data['year_of_study'],
+                passport_photo=form.cleaned_data.get('passport_photo'),
+            )
+            profile.save()
+            _audit(request.user, 'create', 'StudentProfile', profile.pk, '', _student_values(profile))
+        return redirect('ict_students')
+    return render(request, 'portal/ict/student_form.html', {
+        'form': form,
+        'heading': 'Add student',
+    })
+
+
+@role_required(User.Role.ICT)
+@require_http_methods(['GET', 'POST'])
+def ict_student_edit(request, student_id):
+    profile = get_object_or_404(
+        StudentProfile.objects.select_related('user', 'program'),
+        pk=student_id,
+    )
+    form = StudentEditForm(
+        request.POST or None,
+        request.FILES or None,
+        profile=profile,
+        initial={
+            'first_name': profile.user.first_name,
+            'last_name': profile.user.last_name,
+            'matric_number': profile.matric_number,
+            'program': profile.program_id,
+            'year_of_study': profile.year_of_study,
+        },
+    )
+    if request.method == 'POST' and form.is_valid():
+        with transaction.atomic():
+            profile = get_object_or_404(
+                StudentProfile.objects.select_for_update().select_related('user', 'program'),
+                pk=student_id,
+            )
+            old_value = _student_values(profile)
+            old_photo = profile.passport_photo.name if profile.passport_photo else ''
+            user = profile.user
+            user.first_name = form.cleaned_data['first_name']
+            user.last_name = form.cleaned_data['last_name']
+            user.username = form.cleaned_data['matric_number']
+            user.save(update_fields=['first_name', 'last_name', 'username'])
+
+            profile.matric_number = form.cleaned_data['matric_number']
+            profile.program = form.cleaned_data['program']
+            profile.year_of_study = form.cleaned_data['year_of_study']
+            if form.cleaned_data.get('passport_photo'):
+                profile.passport_photo = form.cleaned_data['passport_photo']
+            profile.save()
+            new_value = _student_values(profile)
+            _audit(request.user, 'edit', 'StudentProfile', profile.pk, old_value, new_value)
+
+            new_photo = profile.passport_photo.name if profile.passport_photo else ''
+            if old_photo != new_photo:
+                _audit(
+                    request.user,
+                    'photo_change',
+                    'StudentProfile',
+                    profile.pk,
+                    f'passport_photo={old_photo}',
+                    f'passport_photo={new_photo}',
+                )
+                if old_photo:
+                    storage = profile.passport_photo.storage
+                    transaction.on_commit(
+                        lambda storage=storage, name=old_photo: storage.delete(name)
+                    )
+        return redirect('ict_students')
+    return render(request, 'portal/ict/student_form.html', {
+        'form': form,
+        'heading': 'Edit student',
+        'profile': profile,
+    })
+
+
+@role_required(User.Role.ICT)
+@require_POST
+def ict_student_deactivate(request, student_id):
+    with transaction.atomic():
+        profile = get_object_or_404(
+            StudentProfile.objects.select_for_update().select_related('user', 'program'),
+            pk=student_id,
+        )
+        old_value = _student_values(profile)
+        profile.status = StudentProfile.Status.DEACTIVATED
+        profile.user.is_active = False
+        profile.user.save(update_fields=['is_active'])
+        profile.save(update_fields=['status'])
+        _audit(
+            request.user,
+            'deactivate',
+            'StudentProfile',
+            profile.pk,
+            old_value,
+            _student_values(profile),
+        )
+    return redirect('ict_students')
+
+
+@role_required(User.Role.ICT)
+@require_POST
+def ict_student_reactivate(request, student_id):
+    with transaction.atomic():
+        profile = get_object_or_404(
+            StudentProfile.objects.select_for_update().select_related('user', 'program'),
+            pk=student_id,
+        )
+        old_value = _student_values(profile)
+        profile.status = StudentProfile.Status.ACTIVE
+        profile.user.is_active = True
+        profile.user.save(update_fields=['is_active'])
+        profile.save(update_fields=['status'])
+        _audit(
+            request.user,
+            'reactivate',
+            'StudentProfile',
+            profile.pk,
+            old_value,
+            _student_values(profile),
+        )
+    return redirect('ict_students')
+
+
+@role_required(User.Role.ICT)
+@require_POST
+def ict_student_reset_password(request, student_id):
+    profile = get_object_or_404(
+        StudentProfile.objects.select_related('user'),
+        pk=student_id,
+    )
+    form = StudentPasswordResetForm(request.POST, profile=profile)
+    if form.is_valid():
+        with transaction.atomic():
+            old_value = f'must_change_password={profile.user.must_change_password}'
+            profile.user.set_password(form.cleaned_data['password1'])
+            profile.user.must_change_password = True
+            profile.user.save(update_fields=['password', 'must_change_password'])
+            _audit(
+                request.user,
+                'password_reset',
+                'StudentProfile',
+                profile.pk,
+                old_value,
+                'temporary_password_set=True; must_change_password=True',
+            )
+        return redirect('ict_students')
+    return render(
+        request,
+        'portal/ict/student_list.html',
+        _student_list_context(request, form, profile.pk),
     )
 
 

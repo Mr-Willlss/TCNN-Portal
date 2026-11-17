@@ -1,6 +1,8 @@
 from io import BytesIO
+import os
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from PIL import Image
 from django.test import RequestFactory, TestCase
@@ -340,3 +342,419 @@ class ICTAdminAreaTests(TestCase):
         self.assertNotIn(initial_password, audit_values)
         self.assertNotIn(reset_password, audit_values)
         self.assertNotIn(created.password, audit_values)
+
+
+class ICTStudentManagementTests(TestCase):
+    password = 'Some-Strong-Password-2026!'
+
+    def setUp(self):
+        self.User = get_user_model()
+        self.ict = self.User.objects.create_user(
+            username='ictadmin',
+            password=self.password,
+            role=self.User.Role.ICT,
+        )
+        self.library = self.User.objects.create_user(
+            username='libraryuser',
+            password=self.password,
+            role=self.User.Role.LIBRARY,
+        )
+        self.student_user = self.User.objects.create_user(
+            username='studentuser',
+            password=self.password,
+            role=self.User.Role.STUDENT,
+        )
+        self.program = Program.objects.create(
+            name='Bachelor of Arts',
+            code='BA',
+            duration_years=4,
+        )
+        self.profile = self.create_profile('BA001')
+        self.paths = [
+            reverse('ict_students'),
+            reverse('ict_student_add'),
+            reverse('ict_student_edit', args=[self.profile.pk]),
+            reverse('ict_student_deactivate', args=[self.profile.pk]),
+            reverse('ict_student_reactivate', args=[self.profile.pk]),
+            reverse('ict_student_reset_password', args=[self.profile.pk]),
+        ]
+
+    def create_profile(self, matric_number='BA001', **kwargs):
+        user = self.User.objects.create_user(
+            username=matric_number,
+            password=self.password,
+            first_name='Student',
+            last_name='Example',
+            role=self.User.Role.STUDENT,
+        )
+        return StudentProfile.objects.create(
+            user=user,
+            matric_number=matric_number,
+            program=self.program,
+            year_of_study=1,
+            **kwargs,
+        )
+
+    def create_form_data(self, matric_number='BA100', **kwargs):
+        data = {
+            'first_name': 'New',
+            'last_name': 'Student',
+            'matric_number': matric_number,
+            'program': self.program.pk,
+            'year_of_study': 2,
+            'temporary_password': 'Excellent-Temporary-Password-2026!',
+        }
+        data.update(kwargs)
+        return data
+
+    def post_student_create(self, data=None, files=None):
+        self.client.force_login(self.ict)
+        return self.client.post(
+            reverse('ict_student_add'),
+            data or self.create_form_data(),
+            files or {},
+        )
+
+    def test_every_student_url_forbids_library_and_student_and_redirects_anonymous(self):
+        for path in self.paths:
+            with self.subTest(path=path):
+                self.client.force_login(self.library)
+                self.assertEqual(self.client.get(path).status_code, 403)
+                self.client.force_login(self.student_user)
+                self.assertEqual(self.client.get(path).status_code, 403)
+                self.client.logout()
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 302)
+                self.assertTrue(response.url.startswith(f'{reverse("login")}?next='))
+
+    def test_student_deactivate_reactivate_and_password_reset_are_post_only(self):
+        self.client.force_login(self.ict)
+        for name in (
+            'ict_student_deactivate',
+            'ict_student_reactivate',
+            'ict_student_reset_password',
+        ):
+            with self.subTest(name=name):
+                response = self.client.get(reverse(name, args=[self.profile.pk]))
+                self.assertEqual(response.status_code, 405)
+
+    def test_ict_can_render_student_pages_and_clearance_is_read_only_text(self):
+        self.client.force_login(self.ict)
+        for path in (
+            reverse('ict_students'),
+            reverse('ict_student_add'),
+            reverse('ict_student_edit', args=[self.profile.pk]),
+        ):
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 200)
+                self.assertContains(response, 'csrfmiddlewaretoken')
+        list_response = self.client.get(
+            reverse('ict_students'),
+            {'program': self.program.pk, 'status': StudentProfile.Status.ACTIVE},
+        )
+        self.assertContains(list_response, 'BA001')
+        self.assertContains(list_response, 'Not cleared')
+        self.assertNotContains(
+            self.client.get(reverse('ict_student_edit', args=[self.profile.pk])),
+            'clinic_clearance',
+        )
+
+    def test_student_list_search_and_paginates_25_per_page(self):
+        extra_users = [
+            self.User(
+                username=f'BA{number:03d}',
+                password='!',
+                first_name='Page',
+                last_name='Student',
+                role=self.User.Role.STUDENT,
+            )
+            for number in range(100, 125)
+        ]
+        extra_users = self.User.objects.bulk_create(extra_users)
+        StudentProfile.objects.bulk_create([
+            StudentProfile(
+                user=user,
+                matric_number=user.username,
+                program=self.program,
+                year_of_study=1,
+            )
+            for user in extra_users
+        ])
+        self.client.force_login(self.ict)
+        response = self.client.get(reverse('ict_students'))
+        self.assertEqual(response.context['page_obj'].paginator.per_page, 25)
+        self.assertEqual(len(response.context['students']), 25)
+        second_page = self.client.get(reverse('ict_students'), {'page': 2})
+        self.assertEqual(len(second_page.context['students']), 1)
+        self.assertContains(
+            self.client.get(reverse('ict_students'), {'q': 'BA001'}),
+            'BA001',
+        )
+        self.assertContains(
+            self.client.get(reverse('ict_students'), {'q': 'Student Example'}),
+            'BA001',
+        )
+
+    def test_add_creates_student_user_and_profile_with_uppercase_matric(self):
+        self.client.force_login(self.ict)
+        response = self.client.post(
+            reverse('ict_student_add'),
+            self.create_form_data('ba100'),
+        )
+        self.assertRedirects(response, reverse('ict_students'))
+        user = self.User.objects.get(username='BA100')
+        profile = StudentProfile.objects.get(matric_number='BA100')
+        self.assertEqual(user.role, self.User.Role.STUDENT)
+        self.assertTrue(user.must_change_password)
+        self.assertEqual(profile.user_id, user.pk)
+        self.assertTrue(AuditLog.objects.filter(
+            actor=self.ict,
+            action='create',
+            target_type='StudentProfile',
+            target_id=str(profile.pk),
+        ).exists())
+
+    def test_creation_rolls_back_user_when_profile_save_fails(self):
+        self.client.force_login(self.ict)
+        with patch.object(
+            StudentProfile,
+            'save',
+            side_effect=ValidationError('Profile save failed.'),
+        ):
+            with self.assertRaises(ValidationError):
+                self.client.post(
+                    reverse('ict_student_add'),
+                    self.create_form_data('BAFAIL'),
+                )
+        self.assertFalse(self.User.objects.filter(username='BAFAIL').exists())
+        self.assertFalse(StudentProfile.objects.filter(matric_number='BAFAIL').exists())
+
+    def test_duplicate_matric_is_rejected_case_insensitively(self):
+        self.client.force_login(self.ict)
+        response = self.client.post(
+            reverse('ict_student_add'),
+            self.create_form_data('ba001'),
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.User.objects.filter(username__iexact='BA001').count(), 1)
+        self.assertEqual(StudentProfile.objects.filter(matric_number__iexact='BA001').count(), 1)
+
+    def test_year_above_program_duration_is_rejected(self):
+        self.client.force_login(self.ict)
+        response = self.client.post(
+            reverse('ict_student_add'),
+            self.create_form_data('BA101', year_of_study=5),
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(self.User.objects.filter(username='BA101').exists())
+
+    def test_temporary_password_uses_django_password_validators(self):
+        self.client.force_login(self.ict)
+        response = self.client.post(
+            reverse('ict_student_add'),
+            self.create_form_data('BA105', temporary_password='short'),
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(self.User.objects.filter(username='BA105').exists())
+
+    def test_non_image_named_jpg_is_rejected(self):
+        upload = SimpleUploadedFile(
+            'not-an-image.jpg',
+            b'not actually a JPEG image',
+            content_type='image/jpeg',
+        )
+        self.client.force_login(self.ict)
+        data = self.create_form_data('BA102')
+        data['passport_photo'] = upload
+        response = self.client.post(
+            reverse('ict_student_add'),
+            data,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(self.User.objects.filter(username='BA102').exists())
+
+    def test_photo_over_2_mb_is_rejected(self):
+        image_buffer = BytesIO()
+        pixels = os.urandom(1200 * 1200 * 3)
+        Image.frombytes('RGB', (1200, 1200), pixels).save(image_buffer, format='PNG')
+        self.assertGreater(len(image_buffer.getvalue()), 2 * 1024 * 1024)
+        upload = SimpleUploadedFile(
+            'large.png',
+            image_buffer.getvalue(),
+            content_type='image/png',
+        )
+        self.client.force_login(self.ict)
+        data = self.create_form_data('BA103')
+        data['passport_photo'] = upload
+        response = self.client.post(
+            reverse('ict_student_add'),
+            data,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(self.User.objects.filter(username='BA103').exists())
+
+    def test_uploaded_photo_is_resized_to_fit_400_by_400(self):
+        image_buffer = BytesIO()
+        Image.new('RGB', (800, 600), color='blue').save(image_buffer, format='JPEG')
+        upload = SimpleUploadedFile(
+            'passport.jpg',
+            image_buffer.getvalue(),
+            content_type='image/jpeg',
+        )
+        self.client.force_login(self.ict)
+        with TemporaryDirectory() as media_root, override_settings(MEDIA_ROOT=media_root):
+            data = self.create_form_data('BA104')
+            data['passport_photo'] = upload
+            response = self.client.post(
+                reverse('ict_student_add'),
+                data,
+            )
+            self.assertRedirects(response, reverse('ict_students'))
+            profile = StudentProfile.objects.get(matric_number='BA104')
+            with Image.open(profile.passport_photo.path) as saved_photo:
+                self.assertLessEqual(saved_photo.width, 400)
+                self.assertLessEqual(saved_photo.height, 400)
+
+    def test_posted_clinic_clearance_is_ignored_when_editing(self):
+        self.profile.clinic_clearance = StudentProfile.ClinicClearance.CLEARED
+        self.profile.save(update_fields=['clinic_clearance'])
+        self.client.force_login(self.ict)
+        response = self.client.post(
+            reverse('ict_student_edit', args=[self.profile.pk]),
+            {
+                'first_name': 'Updated',
+                'last_name': 'Student',
+                'matric_number': self.profile.matric_number,
+                'program': self.program.pk,
+                'year_of_study': 1,
+                'clinic_clearance': StudentProfile.ClinicClearance.NOT_CLEARED,
+            },
+        )
+        self.assertRedirects(response, reverse('ict_students'))
+        self.profile.refresh_from_db()
+        self.assertEqual(
+            self.profile.clinic_clearance,
+            StudentProfile.ClinicClearance.CLEARED,
+        )
+
+    def test_replacing_photo_deletes_old_file_and_audits_photo_change(self):
+        with TemporaryDirectory() as media_root, override_settings(MEDIA_ROOT=media_root):
+            old_buffer = BytesIO()
+            Image.new('RGB', (500, 300), color='red').save(old_buffer, format='JPEG')
+            self.profile.passport_photo = SimpleUploadedFile(
+                'old.jpg',
+                old_buffer.getvalue(),
+                content_type='image/jpeg',
+            )
+            self.profile.save()
+            old_path = self.profile.passport_photo.path
+
+            new_buffer = BytesIO()
+            Image.new('RGB', (600, 400), color='green').save(new_buffer, format='PNG')
+            data = {
+                'first_name': 'Updated',
+                'last_name': 'Student',
+                'matric_number': self.profile.matric_number,
+                'program': self.program.pk,
+                'year_of_study': 1,
+                'passport_photo': SimpleUploadedFile(
+                    'new.png',
+                    new_buffer.getvalue(),
+                    content_type='image/png',
+                ),
+            }
+            self.client.force_login(self.ict)
+            with self.captureOnCommitCallbacks(execute=True):
+                response = self.client.post(
+                    reverse('ict_student_edit', args=[self.profile.pk]),
+                    data,
+                )
+
+            self.assertRedirects(response, reverse('ict_students'))
+            self.assertFalse(os.path.exists(old_path))
+            self.assertTrue(AuditLog.objects.filter(
+                target_type='StudentProfile',
+                target_id=str(self.profile.pk),
+                action='photo_change',
+            ).exists())
+
+    def test_edit_changes_username_and_deactivation_reactivation_status(self):
+        self.client.force_login(self.ict)
+        response = self.client.post(
+            reverse('ict_student_edit', args=[self.profile.pk]),
+            {
+                'first_name': 'Updated',
+                'last_name': 'Student',
+                'matric_number': 'BA002',
+                'program': self.program.pk,
+                'year_of_study': 3,
+            },
+        )
+        self.assertRedirects(response, reverse('ict_students'))
+        self.profile.refresh_from_db()
+        self.profile.user.refresh_from_db()
+        self.assertEqual(self.profile.matric_number, 'BA002')
+        self.assertEqual(self.profile.user.username, 'BA002')
+        self.assertRedirects(
+            self.client.post(reverse('ict_student_deactivate', args=[self.profile.pk])),
+            reverse('ict_students'),
+        )
+        self.profile.refresh_from_db()
+        self.profile.user.refresh_from_db()
+        self.assertEqual(self.profile.status, StudentProfile.Status.DEACTIVATED)
+        self.assertFalse(self.profile.user.is_active)
+        self.assertRedirects(
+            self.client.post(reverse('ict_student_reactivate', args=[self.profile.pk])),
+            reverse('ict_students'),
+        )
+        self.profile.refresh_from_db()
+        self.profile.user.refresh_from_db()
+        self.assertEqual(self.profile.status, StudentProfile.Status.ACTIVE)
+        self.assertTrue(self.profile.user.is_active)
+        for action in ('edit', 'deactivate', 'reactivate'):
+            with self.subTest(action=action):
+                log = AuditLog.objects.get(
+                    target_type='StudentProfile',
+                    target_id=str(self.profile.pk),
+                    action=action,
+                )
+                self.assertTrue(log.old_value)
+                self.assertTrue(log.new_value)
+
+    def test_password_reset_is_audited_without_password_values(self):
+        self.client.force_login(self.ict)
+        create_password = 'Initial-Temporary-Password-2026!'
+        response = self.client.post(
+            reverse('ict_student_add'),
+            self.create_form_data(
+                'BA106',
+                temporary_password=create_password,
+            ),
+        )
+        self.assertRedirects(response, reverse('ict_students'))
+        profile = StudentProfile.objects.get(matric_number='BA106')
+        temporary_password = 'Reset-Temporary-Password-2026!'
+        response = self.client.post(
+            reverse('ict_student_reset_password', args=[profile.pk]),
+            {
+                'password1': temporary_password,
+                'password2': temporary_password,
+            },
+        )
+        self.assertRedirects(response, reverse('ict_students'))
+        profile.user.refresh_from_db()
+        self.assertTrue(profile.user.check_password(temporary_password))
+        self.assertTrue(profile.user.must_change_password)
+        logs = AuditLog.objects.filter(
+            target_type='StudentProfile',
+            target_id=str(profile.pk),
+        )
+        values = ' '.join(
+            logs.values_list('old_value', flat=True)
+        ) + ' ' + ' '.join(logs.values_list('new_value', flat=True))
+        self.assertNotIn(create_password, values)
+        self.assertNotIn(temporary_password, values)
+        self.assertNotIn(profile.user.password, values)
+        self.assertTrue(logs.filter(action='create').exists())
+        self.assertTrue(logs.filter(action='password_reset').exists())

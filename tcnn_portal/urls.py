@@ -45,6 +45,28 @@ urlpatterns = [
         ict_views.ict_staff_reset_password,
         name='ict_staff_reset_password',
     ),
+    path('ict/students/', ict_views.ict_students, name='ict_students'),
+    path('ict/students/add/', ict_views.ict_student_add, name='ict_student_add'),
+    path(
+        'ict/students/<int:student_id>/edit/',
+        ict_views.ict_student_edit,
+        name='ict_student_edit',
+    ),
+    path(
+        'ict/students/<int:student_id>/deactivate/',
+        ict_views.ict_student_deactivate,
+        name='ict_student_deactivate',
+    ),
+    path(
+        'ict/students/<int:student_id>/reactivate/',
+        ict_views.ict_student_reactivate,
+        name='ict_student_reactivate',
+    ),
+    path(
+        'ict/students/<int:student_id>/reset-password/',
+        ict_views.ict_student_reset_password,
+        name='ict_student_reset_password',
+    ),
     path('student/', portal_views.student_home, name='student_home'),
     path('library/', portal_views.library_home, name='library_home'),
 ]

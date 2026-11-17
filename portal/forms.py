@@ -4,7 +4,7 @@ from django import forms
 from django.contrib.auth import get_user_model, password_validation
 from django.core.exceptions import ValidationError
 
-from .models import Program
+from .models import Program, StudentProfile, _process_passport_photo
 
 
 class ProgramForm(forms.ModelForm):
@@ -114,3 +114,106 @@ class TemporaryPasswordForm(forms.Form):
             except ValidationError as error:
                 self.add_error('password1', error)
         return cleaned_data
+
+
+class StudentFormBase(forms.Form):
+    first_name = forms.CharField(max_length=150)
+    last_name = forms.CharField(max_length=150)
+    matric_number = forms.CharField(max_length=50)
+    program = forms.ModelChoiceField(queryset=Program.objects.order_by('name', 'code'))
+    year_of_study = forms.IntegerField(min_value=1)
+    passport_photo = forms.ImageField(required=False)
+
+    def __init__(self, *args, profile=None, **kwargs):
+        self.profile = profile
+        super().__init__(*args, **kwargs)
+
+    def clean_matric_number(self):
+        matric_number = self.cleaned_data['matric_number'].strip().upper()
+        profiles = StudentProfile.objects.filter(matric_number__iexact=matric_number)
+        if self.profile:
+            profiles = profiles.exclude(pk=self.profile.pk)
+        User = get_user_model()
+        usernames = User.objects.filter(username__iexact=matric_number)
+        if self.profile:
+            usernames = usernames.exclude(pk=self.profile.user_id)
+        if profiles.exists() or usernames.exists():
+            raise ValidationError('A student with that matric number already exists.')
+        return matric_number
+
+    def clean(self):
+        cleaned_data = super().clean()
+        program = cleaned_data.get('program')
+        year_of_study = cleaned_data.get('year_of_study')
+        if program and year_of_study and year_of_study > program.duration_years:
+            self.add_error(
+                'year_of_study',
+                f"Year of study cannot exceed this program's duration of {program.duration_years}.",
+            )
+
+        upload = cleaned_data.get('passport_photo')
+        if upload:
+            try:
+                _process_passport_photo(upload)
+            except ValidationError as error:
+                self.add_error('passport_photo', error)
+            finally:
+                upload.seek(0)
+        return cleaned_data
+
+
+class StudentCreateForm(StudentFormBase):
+    temporary_password = forms.CharField(
+        label='Temporary password',
+        strip=False,
+        widget=forms.PasswordInput,
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.order_fields((
+            'first_name',
+            'last_name',
+            'matric_number',
+            'program',
+            'year_of_study',
+            'temporary_password',
+            'passport_photo',
+        ))
+
+    def clean(self):
+        cleaned_data = super().clean()
+        password = cleaned_data.get('temporary_password')
+        matric_number = cleaned_data.get('matric_number')
+        if password and matric_number:
+            User = get_user_model()
+            user = User(
+                username=matric_number,
+                first_name=cleaned_data.get('first_name', ''),
+                last_name=cleaned_data.get('last_name', ''),
+                role=User.Role.STUDENT,
+            )
+            try:
+                password_validation.validate_password(password, user)
+            except ValidationError as error:
+                self.add_error('temporary_password', error)
+        return cleaned_data
+
+
+class StudentEditForm(StudentFormBase):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.order_fields((
+            'first_name',
+            'last_name',
+            'matric_number',
+            'program',
+            'year_of_study',
+            'passport_photo',
+        ))
+
+
+class StudentPasswordResetForm(TemporaryPasswordForm):
+    def __init__(self, *args, profile=None, **kwargs):
+        self.profile = profile
+        super().__init__(*args, user=profile.user if profile else None, **kwargs)
